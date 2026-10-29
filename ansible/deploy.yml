@@ -1,0 +1,75 @@
+---
+- name: Configure EC2 and deploy self-care app
+  hosts: all
+  remote_user: ec2-user
+  become: true
+  vars:
+    app_directory: /opt/selfcare-app
+    docker_compose_version: v2.32.4
+
+  tasks:
+    - name: Install Docker
+      ansible.builtin.dnf:
+        name: docker
+        state: present
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Create Docker CLI plugin directory
+      ansible.builtin.file:
+        path: /usr/local/lib/docker/cli-plugins
+        state: directory
+        mode: "0755"
+
+    - name: Install Docker Compose plugin
+      ansible.builtin.get_url:
+        url: "https://github.com/docker/compose/releases/download/{{ docker_compose_version }}/docker-compose-linux-x86_64"
+        dest: /usr/local/lib/docker/cli-plugins/docker-compose
+        mode: "0755"
+
+    - name: Create application directory
+      ansible.builtin.file:
+        path: "{{ app_directory }}"
+        state: directory
+        owner: ec2-user
+        group: ec2-user
+        mode: "0750"
+
+    - name: Copy release archive to EC2
+      ansible.builtin.copy:
+        src: "{{ release_archive }}"
+        dest: /tmp/selfcare-app-release.tar.gz
+        mode: "0600"
+
+    - name: Unpack application release
+      ansible.builtin.unarchive:
+        src: /tmp/selfcare-app-release.tar.gz
+        dest: "{{ app_directory }}"
+        remote_src: true
+
+    - name: Install production environment file
+      ansible.builtin.copy:
+        src: "{{ production_env_file }}"
+        dest: "{{ app_directory }}/.env"
+        owner: root
+        group: root
+        mode: "0600"
+
+    - name: Build and start application containers
+      ansible.builtin.command:
+        cmd: docker compose --env-file .env up -d --build --remove-orphans
+        chdir: "{{ app_directory }}"
+      changed_when: true
+
+    - name: Wait for application health endpoint
+      ansible.builtin.uri:
+        url: http://127.0.0.1/api/health
+        status_code: 200
+      register: app_health
+      retries: 12
+      delay: 5
+      until: app_health.status == 200

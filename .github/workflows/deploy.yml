@@ -1,63 +1,89 @@
-name: 🚀 Deploy to EC2 Production
+name: Deploy self-care app
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   deploy:
-    name: Deploy to EC2
-    runs-on: ubuntu-latest
-    
+    runs-on: self-hosted
+    environment: master 
     steps:
-      - name: Deploy to EC2
-        uses: appleboy/ssh-action@v1.0.0
-        with:
-          host: ${{ secrets.EC2_HOST }}
-          username: ec2-user
-          key: ${{ secrets.EC2_SSH_KEY }}
-          script: |
-            cd selfcare-app
-            git pull origin main
-            
-            # Create .env file in root for docker-compose
-            cat > .env << EOF
-            DB_HOST=${{ secrets.DB_HOST }}
-            DB_USER=${{ secrets.DB_USER }}
-            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-            DB_NAME=${{ secrets.DB_NAME }}
-            EOF
-            
-            # Also create .env in backend directory
-            cat > backend/.env << EOF
-            PORT=5000
-            DB_HOST=${{ secrets.DB_HOST }}
-            DB_USER=${{ secrets.DB_USER }}
-            DB_PASSWORD=${{ secrets.DB_PASSWORD }}
-            DB_NAME=${{ secrets.DB_NAME }}
-            EOF
-            
-            # Clean up old Docker images
-            docker system prune -a -f
-            
-            # Stop and remove existing containers
-            docker-compose down || true
-            
-            # Build and start services
-            docker-compose up -d --build
-            
-            # Wait for services to be ready
-            sleep 15
-            
-            # Verify deployment
-            echo "Testing application endpoints..."
-            curl -f http://localhost:5000/api/health || echo "Backend not ready yet"
-            curl -f http://localhost:80 || echo "Frontend not ready yet"
-            
-            # Show container status
-            echo "Container status:"
-            docker-compose ps
-            
-            echo "✅ Deployment completed!"
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Validate deployment secrets
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: |
+          set -euo pipefail
+          for name in EC2_HOST EC2_SSH_KEY EC2_KNOWN_HOSTS DB_HOST DB_USER DB_PASSWORD DB_NAME; do
+            if [[ -z "${!name}" ]]; then
+              echo "::error::$name must be configured as a production environment secret"
+              exit 1
+            fi
+          done
+
+      - name: Package deployment
+        env:
+          DB_HOST: ${{ secrets.DB_HOST }}
+          DB_PORT: ${{ secrets.DB_PORT || '3306' }}
+          DB_USER: ${{ secrets.DB_USER }}
+          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
+          DB_NAME: ${{ secrets.DB_NAME }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          def env_value(value):
+              if "\n" in value or "\r" in value:
+                  raise ValueError("Environment values cannot contain newlines")
+              return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+          names = ("DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME")
+          env_file = Path(os.environ["RUNNER_TEMP"]) / ".env.prod"
+          env_file.write_text("".join(f"{name}={env_value(os.environ[name])}\n" for name in names))
+          env_file.chmod(0o600)
+          PY
+          tar -czf "$RUNNER_TEMP/selfcare-app.tar.gz" \
+            --exclude=.git \
+            --exclude=node_modules \
+            --exclude=terraform/.terraform \
+            --exclude=terraform/terraform.tfstate \
+            --exclude=terraform/terraform.tfstate.backup \
+            --exclude='*.tfvars' \
+            --exclude='.env' \
+            --exclude='.env.*' \
+            --exclude='*/.env' \
+            --exclude='*/.env.*' \
+            .
+
+      - name: Deploy with Ansible
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
+          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -d -m 700 "$HOME/.ssh"
+          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
+          printf '%s' "$EC2_SSH_KEY" > "$RUNNER_TEMP/ec2_key"
+          chmod 600 "$RUNNER_TEMP/ec2_key"
+          ansible-playbook \
+            -i "${EC2_HOST}," \
+            --private-key "$RUNNER_TEMP/ec2_key" \
+            ansible/deploy.yml \
+            -e "release_archive=$RUNNER_TEMP/selfcare-app.tar.gz" \
+            -e "production_env_file=$RUNNER_TEMP/.env.prod"
