@@ -1,4 +1,4 @@
-name: Deploy self-care app
+name: Deploy
 
 on:
   push:
@@ -10,31 +10,10 @@ permissions:
 
 jobs:
   deploy:
-    runs-on: self-hosted
-    environment: master 
+    runs-on: self-care-runner
     steps:
-      - name: Check out source
-        uses: actions/checkout@v4
-
-      - name: Validate deployment secrets
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
-          DB_HOST: ${{ secrets.DB_HOST }}
-          DB_USER: ${{ secrets.DB_USER }}
-          DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
-          DB_NAME: ${{ secrets.DB_NAME }}
-        run: |
-          set -euo pipefail
-          for name in EC2_HOST EC2_SSH_KEY EC2_KNOWN_HOSTS DB_HOST DB_USER DB_PASSWORD DB_NAME; do
-            if [[ -z "${!name}" ]]; then
-              echo "::error::$name must be configured as a production environment secret"
-              exit 1
-            fi
-          done
-
-      - name: Package deployment
+      - uses: actions/checkout@v4
+      - name: Create backend environment file
         env:
           DB_HOST: ${{ secrets.DB_HOST }}
           DB_PORT: ${{ secrets.DB_PORT || '3306' }}
@@ -42,48 +21,25 @@ jobs:
           DB_PASSWORD: ${{ secrets.DB_PASSWORD }}
           DB_NAME: ${{ secrets.DB_NAME }}
         run: |
-          set -euo pipefail
+          umask 077
           python3 - <<'PY'
           import os
           from pathlib import Path
 
-          def env_value(value):
-              if "\n" in value or "\r" in value:
-                  raise ValueError("Environment values cannot contain newlines")
-              return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-
           names = ("DB_HOST", "DB_PORT", "DB_USER", "DB_PASSWORD", "DB_NAME")
-          env_file = Path(os.environ["RUNNER_TEMP"]) / ".env.prod"
-          env_file.write_text("".join(f"{name}={env_value(os.environ[name])}\n" for name in names))
-          env_file.chmod(0o600)
+          lines = []
+          for name in names:
+              value = os.environ[name]
+              if "\n" in value or "\r" in value:
+                  raise ValueError(f"{name} cannot contain a newline")
+              escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+              lines.append(f"{name}='{escaped}'\n")
+          Path(".env").write_text("".join(lines))
           PY
-          tar -czf "$RUNNER_TEMP/selfcare-app.tar.gz" \
-            --exclude=.git \
-            --exclude=node_modules \
-            --exclude=terraform/.terraform \
-            --exclude=terraform/terraform.tfstate \
-            --exclude=terraform/terraform.tfstate.backup \
-            --exclude='*.tfvars' \
-            --exclude='.env' \
-            --exclude='.env.*' \
-            --exclude='*/.env' \
-            --exclude='*/.env.*' \
-            .
 
-      - name: Deploy with Ansible
-        env:
-          EC2_HOST: ${{ secrets.EC2_HOST }}
-          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
-          EC2_KNOWN_HOSTS: ${{ secrets.EC2_KNOWN_HOSTS }}
+      - name: Stop and remove existing containers
         run: |
-          set -euo pipefail
-          install -d -m 700 "$HOME/.ssh"
-          printf '%s\n' "$EC2_KNOWN_HOSTS" > "$HOME/.ssh/known_hosts"
-          printf '%s' "$EC2_SSH_KEY" > "$RUNNER_TEMP/ec2_key"
-          chmod 600 "$RUNNER_TEMP/ec2_key"
-          ansible-playbook \
-            -i "${EC2_HOST}," \
-            --private-key "$RUNNER_TEMP/ec2_key" \
-            ansible/deploy.yml \
-            -e "release_archive=$RUNNER_TEMP/selfcare-app.tar.gz" \
-            -e "production_env_file=$RUNNER_TEMP/.env.prod"
+          docker compose down || true
+
+      - name: Build and start services
+        run: docker compose up -d --build

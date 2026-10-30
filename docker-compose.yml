@@ -5,6 +5,8 @@ services:
       dockerfile: Dockerfile
     container_name: selfcare-backend
     restart: always
+    env_file:
+      - ${BACKEND_ENV_FILE:-./.env}
     environment:
       PORT: 5000
       DB_HOST: ${DB_HOST:?Set DB_HOST in the selected env file}
