@@ -1,0 +1,144 @@
+---
+- name: Bootstrap self-hosted GitHub Actions runner
+  hosts: all
+  remote_user: ec2-user
+  become: true
+  vars:
+    github_repository_url: https://github.com/dhruvi-brainerhub11/self-care-3
+    runner_name: selfcare-ec2
+    runner_label: self-care-runner
+    runner_user: gha-runner
+    runner_directory: /opt/actions-runner
+    docker_compose_version: v2.32.4
+    runner_registration_token: "{{ lookup('env', 'GITHUB_RUNNER_REGISTRATION_TOKEN') }}"
+
+  tasks:
+    - name: Require a short-lived GitHub runner registration token
+      ansible.builtin.assert:
+        that:
+          - runner_registration_token | length > 0
+        fail_msg: Set GITHUB_RUNNER_REGISTRATION_TOKEN in the Ansible controller environment.
+      no_log: true
+
+    - name: Install Docker
+      ansible.builtin.dnf:
+        name: docker
+        state: present
+
+    - name: Enable and start Docker
+      ansible.builtin.systemd:
+        name: docker
+        enabled: true
+        state: started
+
+    - name: Ensure Docker group exists
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Create Docker CLI plugin directory
+      ansible.builtin.file:
+        path: /usr/local/lib/docker/cli-plugins
+        state: directory
+        mode: "0755"
+
+    - name: Install Docker Compose plugin
+      ansible.builtin.get_url:
+        url: "https://github.com/docker/compose/releases/download/{{ docker_compose_version }}/docker-compose-linux-x86_64"
+        dest: /usr/local/lib/docker/cli-plugins/docker-compose
+        mode: "0755"
+
+    - name: Create runner service account
+      ansible.builtin.user:
+        name: "{{ runner_user }}"
+        create_home: true
+        shell: /bin/bash
+        groups: docker
+        append: true
+        state: present
+
+    - name: Create runner directory
+      ansible.builtin.file:
+        path: "{{ runner_directory }}"
+        state: directory
+        owner: "{{ runner_user }}"
+        group: "{{ runner_user }}"
+        mode: "0750"
+
+    - name: Get latest GitHub Actions runner release
+      ansible.builtin.uri:
+        url: https://api.github.com/repos/actions/runner/releases/latest
+        headers:
+          Accept: application/vnd.github+json
+        return_content: true
+      register: runner_release
+
+    - name: Download GitHub Actions runner
+      ansible.builtin.get_url:
+        url: "https://github.com/actions/runner/releases/download/{{ runner_release.json.tag_name }}/actions-runner-linux-x64-{{ runner_release.json.tag_name | regex_replace('^v', '') }}.tar.gz"
+        dest: /tmp/actions-runner-linux-x64.tar.gz
+        mode: "0644"
+
+    - name: Extract GitHub Actions runner
+      ansible.builtin.unarchive:
+        src: /tmp/actions-runner-linux-x64.tar.gz
+        dest: "{{ runner_directory }}"
+        remote_src: true
+        owner: "{{ runner_user }}"
+        group: "{{ runner_user }}"
+
+    - name: Install GitHub runner dependencies on Amazon Linux
+      ansible.builtin.dnf:
+        name:
+          - glibc
+          - libstdc++
+          - zlib
+          - openssl-libs
+          - krb5-libs
+          - libicu
+          - libunwind
+          - libuuid
+        state: present
+
+    - name: Check whether runner is already configured
+      ansible.builtin.stat:
+        path: "{{ runner_directory }}/.runner"
+      register: runner_configuration
+
+    - name: Register runner with GitHub
+      ansible.builtin.command:
+        argv:
+          - runuser
+          - -u
+          - "{{ runner_user }}"
+          - --
+          - "{{ runner_directory }}/config.sh"
+          - "--url"
+          - "{{ github_repository_url }}"
+          - "--token"
+          - "{{ runner_registration_token }}"
+          - "--name"
+          - "{{ runner_name }}"
+          - "--labels"
+          - "{{ runner_label }}"
+          - "--work"
+          - _work
+          - "--unattended"
+      args:
+        chdir: "{{ runner_directory }}"
+      no_log: true
+      when: not runner_configuration.stat.exists
+
+    - name: Install runner service
+      ansible.builtin.command:
+        cmd: "{{ runner_directory }}/svc.sh install {{ runner_user }}"
+      args:
+        chdir: "{{ runner_directory }}"
+        creates: "{{ runner_directory }}/.service"
+
+    - name: Start runner service
+      ansible.builtin.command:
+        cmd: "{{ runner_directory }}/svc.sh start"
+      args:
+        chdir: "{{ runner_directory }}"
+      changed_when: true

@@ -118,7 +118,7 @@ resource "aws_instance" "app" {
 
   root_block_device {
     encrypted   = true
-    volume_size = 16
+    volume_size = 30
     volume_type = "gp3"
   }
 
@@ -146,7 +146,7 @@ resource "aws_db_instance" "app" {
   publicly_accessible     = var.db_publicly_accessible
   multi_az                = var.db_multi_az
   storage_encrypted       = true
-  backup_retention_period = 7
+  backup_retention_period = 0
   deletion_protection     = var.db_deletion_protection
   skip_final_snapshot     = true
 
