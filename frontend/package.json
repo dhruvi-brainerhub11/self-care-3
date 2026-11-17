@@ -1,35 +1,109 @@
 {
-  "name": "selfcare-frontend",
-  "version": "1.0.0",
-  "private": true,
-  "dependencies": {
-    "react": "^18.2.0",
-    "react-dom": "^18.2.0",
-    "react-scripts": "5.0.1",
-    "axios": "^1.5.0",
-    "react-icons": "^4.11.0"
-  },
-  "scripts": {
-    "start": "react-scripts start",
-    "build": "react-scripts build",
-    "test": "react-scripts test",
-    "eject": "react-scripts eject"
-  },
-  "eslintConfig": {
-    "extends": [
-      "react-app"
-    ]
-  },
-  "browserslist": {
-    "production": [
-      ">0.2%",
-      "not dead",
-      "not op_mini all"
-    ],
-    "development": [
-      "last 1 chrome version",
-      "last 1 firefox version",
-      "last 1 safari version"
-    ]
-  }
+	"name": "selfcare-frontend",
+	"version": "1.0.0",
+	"private": true,
+	"dependencies": {
+		"react": "^18.2.0",
+		"react-dom": "^18.2.0",
+		"react-scripts": "5.0.1",
+		"axios": "^1.5.0",
+		"react-icons": "^4.11.0"
+	},
+	"scripts": {
+		"start": "react-scripts start",
+		"lint": "eslint src --max-warnings=0",
+		"build": "react-scripts build",
+		"test": "react-scripts test",
+		"eject": "react-scripts eject"
+	},
+	"eslintConfig": {
+		"extends": [
+			"react-app"
+		]
+	},
+	"browserslist": {
+		"production": [
+			">0.2%",
+			"not dead",
+			"not op_mini all"
+		],
+		"development": [
+			"last 1 chrome version",
+			"last 1 firefox version",
+			"last 1 safari version"
+		]
+	},
+	"Transform": "AWS::Serverless-2016-10-31",
+	"Resources": {
+		"Function": {
+			"Type": "AWS::Serverless::Function",
+			"Properties": {
+				"Description": {
+					"Fn::Sub": [
+						"Stack ${AWS::StackName} Function ${ResourceName}",
+						{
+							"ResourceName": "Function"
+						}
+					]
+				},
+				"CodeUri": "src/Function",
+				"Handler": "index.handler",
+				"Runtime": "nodejs22.x",
+				"MemorySize": 3008,
+				"Timeout": 30,
+				"Tracing": "Active"
+			}
+		},
+		"FunctionLogGroup": {
+			"Type": "AWS::Logs::LogGroup",
+			"DeletionPolicy": "Retain",
+			"Properties": {
+				"LogGroupName": {
+					"Fn::Sub": "/aws/lambda/${Function}"
+				}
+			}
+		},
+		"Api": {
+			"Type": "AWS::Serverless::Api",
+			"Properties": {
+				"Name": {
+					"Fn::Sub": [
+						"${ResourceName} From Stack ${AWS::StackName}",
+						{
+							"ResourceName": "Api"
+						}
+					]
+				},
+				"StageName": "Prod",
+				"DefinitionBody": {
+					"openapi": "3.0",
+					"info": {},
+					"paths": {
+						"/": {
+							"get": {
+								"responses": {}
+							}
+						}
+					}
+				},
+				"EndpointConfiguration": "REGIONAL",
+				"TracingEnabled": true
+			}
+		},
+		"UserPool": {
+			"Type": "AWS::Cognito::UserPool",
+			"Properties": {
+				"AdminCreateUserConfig": {
+					"AllowAdminCreateUserOnly": false
+				},
+				"AliasAttributes": [
+					"email",
+					"preferred_username"
+				],
+				"UserPoolName": {
+					"Fn::Sub": "${AWS::StackName}-UserPool"
+				}
+			}
+		}
+	}
 }
